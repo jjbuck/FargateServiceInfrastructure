@@ -1,0 +1,702 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Infrastructure
+
+Parameters:
+  AppNameLowercase:
+    Type: String
+    #Default: foo
+  AppName:
+    Type: String
+    #Default: foo
+  GithubUser:
+    Type: String
+
+
+
+Mappings:
+  # Hard values for the subnet masks. These masks define
+  # the range of internal IP addresses that can be assigned.
+  # The VPC can have all IP's from 10.0.0.0 to 10.0.255.255
+  # There are four subnets which cover the ranges:
+  #
+  # 10.0.0.0 - 10.0.0.255
+  # 10.0.1.0 - 10.0.1.255
+  # 10.0.2.0 - 10.0.2.255
+  # 10.0.3.0 - 10.0.3.255
+  #
+  # If you need more IP addresses (perhaps you have so many
+  # instances that you run out) then you can customize these
+  # ranges to add more
+  SubnetConfig:
+    VPC:
+      CIDR: '10.0.0.0/16'
+    PublicOne:
+      CIDR: '10.0.0.0/24'
+    PublicTwo:
+      CIDR: '10.0.1.0/24'
+    PrivateOne:
+      CIDR: '10.0.2.0/24'
+    PrivateTwo:
+      CIDR: '10.0.3.0/24'
+
+
+Resources:
+  AppBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AppNameLowercase}-${AWS::AccountId}-${AWS::Region}
+
+  # VPC in which containers will be networked.
+  # It has two public subnets, and two private subnets.
+  # We distribute the subnets across the first two available subnets
+  # for the region, for high availability.
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !FindInMap ['SubnetConfig', 'VPC', 'CIDR']
+
+  # Two public subnets, where a public load balancer will later be created.
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+         Fn::Select:
+         - 0
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      VpcId: !Ref 'VPC'
+      CidrBlock: !FindInMap ['SubnetConfig', 'PublicOne', 'CIDR']
+      MapPublicIpOnLaunch: true
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+         Fn::Select:
+         - 1
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      VpcId: !Ref 'VPC'
+      CidrBlock: !FindInMap ['SubnetConfig', 'PublicTwo', 'CIDR']
+      MapPublicIpOnLaunch: true
+
+  # Two private subnets where containers will only have private
+  # IP addresses, and will only be reachable by other members of the
+  # VPC
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+         Fn::Select:
+         - 0
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      VpcId: !Ref 'VPC'
+      CidrBlock: !FindInMap ['SubnetConfig', 'PrivateOne', 'CIDR']
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+         Fn::Select:
+         - 1
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      VpcId: !Ref 'VPC'
+      CidrBlock: !FindInMap ['SubnetConfig', 'PrivateTwo', 'CIDR']
+
+  # Setup networking resources for the public subnets.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachement:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref 'VPC'
+      InternetGatewayId: !Ref 'InternetGateway'
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref 'VPC'
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachement
+    Properties:
+      RouteTableId: !Ref 'PublicRouteTable'
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref 'InternetGateway'
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+
+  # Setup networking resources for the private subnets. Containers
+  # in these subnets have only private IP addresses, and must use a NAT
+  # gateway to talk to the internet. We launch two NAT gateways, one for
+  # each private subnet.
+  NatGatewayOneAttachment:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachement
+    Properties:
+        Domain: vpc
+  NatGatewayTwoAttachment:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachement
+    Properties:
+        Domain: vpc
+  NatGatewayOne:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayOneAttachment.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+  NatGatewayTwo:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayTwoAttachment.AllocationId
+      SubnetId: !Ref PublicSubnetTwo
+  PrivateRouteTableOne:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref 'VPC'
+  PrivateRouteOne:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableOne
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayOne
+  PrivateRouteTableOneAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableOne
+      SubnetId: !Ref PrivateSubnetOne
+  PrivateRouteTableTwo:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref 'VPC'
+  PrivateRouteTwo:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableTwo
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayTwo
+  PrivateRouteTableTwoAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableTwo
+      SubnetId: !Ref PrivateSubnetTwo
+
+  # VPC Endpoint for DynamoDB
+  # If a container needs to access DynamoDB (coming in module 3) this
+  # allows a container in the private subnet to talk to DynamoDB directly
+  # without needing to go via the NAT gateway.
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "*"
+            Principal: "*"
+            Resource: "*"
+      RouteTableIds:
+        - !Ref 'PrivateRouteTableOne'
+        - !Ref 'PrivateRouteTableTwo'
+      ServiceName: !Join [ "", [ "com.amazonaws.", { "Ref": "AWS::Region" }, ".dynamodb" ] ]
+      VpcId: !Ref 'VPC'
+
+
+
+  # The security group for our service containers to be hosted in Fargate.
+  # Even though traffic from users will pass through a Network Load Balancer,
+  # that traffic is purely TCP passthrough, without security group inspection.
+  # Therefore, we will allow for traffic from the Internet to be accepted by our
+  # containers.  But, because the containers will only have Private IP addresses,
+  # the only traffic that will reach the containers is traffic that is routed
+  # to them by the public load balancer on the specific ports that we configure.
+  FargateContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the fargate containers from the Internet
+      VpcId: !Ref 'VPC'
+      SecurityGroupIngress:
+          # Allow access to NLB from anywhere on the internet
+          - CidrIp: !FindInMap ['SubnetConfig', 'VPC', 'CIDR']
+            IpProtocol: -1
+
+  # This is an IAM role which authorizes ECS to manage resources on your
+  # account on your behalf, such as updating your load balancer with the
+  # details of where your containers are, so that traffic can reach your
+  # containers.
+  EcsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+            - ecs-tasks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              # Rules which allow ECS to attach network interfaces to instances
+              # on your behalf in order for awsvpc networking mode to work right
+              - 'ec2:AttachNetworkInterface'
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:CreateNetworkInterfacePermission'
+              - 'ec2:DeleteNetworkInterface'
+              - 'ec2:DeleteNetworkInterfacePermission'
+              - 'ec2:Describe*'
+              - 'ec2:DetachNetworkInterface'
+
+              # Rules which allow ECS to update load balancers on your behalf
+              # with the information sabout how to send traffic to your containers
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+
+              # Rules which allow ECS to run tasks that have IAM roles assigned to them.
+              - 'iam:PassRole'
+
+              # Rules that let ECS interact with container images.
+              - 'ecr:GetAuthorizationToken'
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'ecr:BatchGetImage'
+
+              # Rules that let ECS create and push logs to CloudWatch.
+              - 'logs:DescribeLogStreams'
+              - 'logs:CreateLogStream'
+              - 'logs:CreateLogGroup'
+              - 'logs:PutLogEvents'
+
+            Resource: '*'
+
+  # This is a role which is used by the ECS tasks. Tasks in Amazon ECS define
+  # the containers that should be deployed togehter and the resources they
+  # require from a compute/memory perspective. So, the policies below will define
+  # the IAM permissions that our Mythical Mysfits docker containers will have.
+  # If you attempted to write any code for the Mythical Mysfits service that
+  # interacted with different AWS service APIs, these roles would need to include
+  # those as allowed actions.
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS Tasks to download images from ECR
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:CreateLogGroup'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+
+            - Effect: Allow
+              Action:
+                # Allows the ECS tasks to interact with only the MysfitsTable
+                # in DynamoDB
+                - 'dynamodb:Scan'
+                - 'dynamodb:Query'
+                - 'dynamodb:UpdateItem'
+                - 'dynamodb:GetItem'
+              Resource: 'arn:aws:dynamodb:*:*:table/MysfitsTable*'
+
+  # An IAM role that allows the AWS CodePipeline service to perform it's
+  # necessary actions. We have intentionally left permissions on this role
+  # that will not be used by the CodePipeline service during this workshop.
+  # This will allow you to more simply use CodePipeline in the future should
+  # you want to use the service for Pipelines that interact with different
+  # AWS services than the ones used in this workshop.
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppName}CodePipelineServiceRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Sub ${AppName}-codepipeline-service-policy
+        PolicyDocument:
+          Statement:
+          - Action:
+            - codecommit:GetBranch
+            - codecommit:GetCommit
+            - codecommit:UploadArchive
+            - codecommit:GetUploadArchiveStatus
+            - codecommit:CancelUploadArchive
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketVersioning
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - s3:PutObject
+            Resource:
+            - arn:aws:s3:::*
+            Effect: Allow
+          - Action:
+            - elasticloadbalancing:*
+            - autoscaling:*
+            - cloudwatch:*
+            - ecs:*
+            - codebuild:*
+            - iam:PassRole
+            Resource: "*"
+            Effect: Allow
+          Version: "2012-10-17"
+
+  # An IAM role that allows the AWS CodeBuild service to perform the actions
+  # required to complete a build of our source code retrieved from CodeCommit,
+  # and push the created image to ECR.
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub
+        - ${AppName}CodeBuildServiceRole
+        - {AppName: !Ref AppName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Sub
+        - ${AppName}-CodeBuildServicePolicy
+        - {AppName: !Ref AppName}
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            Resource: "*"
+          - Effect: "Allow"
+            Action:
+            - "s3:PutObject"
+            - "s3:GetObject"
+            - "s3:GetObjectVersion"
+            - "s3:ListBucket"
+            Resource: "*"
+          - Effect: "Allow"
+            Action:
+            - "ecr:*"
+            Resource: "*"
+
+  #EcrRepository:
+  #  Type: AWS::ECR::Repository
+  #  Properties:
+  #    RepositoryName: !Sub ${AppNameLowercase}
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${AppName}EcsCluster
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub ${AppName}
+
+
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      Family: !Sub ${AppName}
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt EcsServiceRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub ${AppName}Container
+          Image: "784757526031.dkr.ecr.us-west-2.amazonaws.com/footest:latest"
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: http
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AppLogGroup
+              awslogs-region: us-west-2
+              awslogs-stream-prefix: awslogs-fargate-service
+          Essential: true
+  
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Type: network
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+        
+  NetworkLoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AppName}TargetGroup
+      Port: 8080
+      Protocol: TCP
+      TargetType: ip
+      VpcId: !Ref VPC
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: "/"
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+  
+  ElasticLoadBalancingListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref NetworkLoadBalancerTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref NetworkLoadBalancer
+      Port: 80
+      Protocol: TCP
+
+  # Comment out if this already exists in your account
+  #AwsServiceRoleForEcs:
+  #  Type: AWS::IAM::ServiceLinkedRole
+  #  Properties:
+  #    AWSServiceName: ecs.amazonaws.com
+
+  EcsServiceDefinition:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${AppName}-Service
+      Cluster: !Ref EcsCluster
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration: 
+            AssignPublicIp: DISABLED
+            SecurityGroups: 
+              - !Ref FargateContainerSecurityGroup
+            Subnets: 
+              - !Ref PrivateSubnetOne
+              - !Ref PrivateSubnetTwo
+      TaskDefinition: !Ref EcsTaskDefinition
+      LoadBalancers:
+        - ContainerName: !Sub ${AppName}Container
+          ContainerPort: 8080
+          TargetGroupArn: !Ref NetworkLoadBalancerTargetGroup
+
+
+  ##### Pipeline resources
+  PipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AppNameLowercase}-${AWS::AccountId}-build
+      
+  PipelineArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PipelineArtifactBucket
+      PolicyDocument: 
+        Statement:
+          - 
+            Action:
+              - "s3:GetObject"
+              - "s3:GetObjectVersion"
+              - "s3:GetBucketVersioning"
+            Effect: Allow
+            Resource:
+              - !Join ["", ["arn:aws:s3:::", !Ref PipelineArtifactBucket, "/*"]]
+              - !Join ["", ["arn:aws:s3:::", !Ref PipelineArtifactBucket]]
+            Principal:
+              AWS:
+                - !GetAtt CodeBuildServiceRole.Arn
+                - !GetAtt CodePipelineServiceRole.Arn
+                  
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS # No articacts for building and pushing Docker image
+      Source:
+        Type: GITHUB
+        Location: !Sub https://github.com/${GithubUser}/${AppName}.git
+        Auth:
+          Type: OAUTH
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/docker:17.09.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: APP_NAME_LOWERCASE
+            Value: !Sub ${AppNameLowercase}
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: CONTAINER_NAME
+            Value: !Sub ${AppName}Container
+      Name: !Sub ${AppName}
+      ServiceRole: !Ref CodeBuildServiceRole
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${AppName}Pipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GithubUser
+                Repo: !Sub ${AppName}
+                Branch: master
+                OAuthToken: "{{resolve:secretsmanager:GithubPersonalAccessToken:SecretString:GithubPersonalAccessToken}}"
+              OutputArtifacts:
+                - Name: !Sub ${AppName}-SourceArtifact
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: !Sub ${AppName}-SourceArtifact
+              OutputArtifacts:
+                - Name: !Sub ${AppName}-BuildArtifact
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: ECS
+              Configuration:
+                ClusterName: !Ref EcsCluster
+                ServiceName: !Ref EcsServiceDefinition
+                FileName: imagedefinitions.json
+              InputArtifacts:
+                - Name: !Sub ${AppName}-BuildArtifact
+              RunOrder: 1
+
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  CurrentRegion:
+    Description: REPLACE_ME_REGION
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'CurrentRegion' ] ]
+  CurrentAccount:
+    Description: REPLACE_ME_ACCOUNT_ID
+    Value: !Ref AWS::AccountId
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'CurrentAccount' ] ]
+  EcsServiceRole:
+    Description: REPLACE_ME_ECS_SERVICE_ROLE_ARN
+    Value: !GetAtt 'EcsServiceRole.Arn'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'EcsServiceRole' ] ]
+  ECSTaskRole:
+    Description: REPLACE_ME_ECS_TASK_ROLE_ARN
+    Value: !GetAtt 'ECSTaskRole.Arn'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ECSTaskRole' ] ]
+  VPCId:
+    Description: REPLACE_ME_VPC_ID
+    Value: !Ref 'VPC'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'VPCId' ] ]
+  PublicSubnetOne:
+    Description: REPLACE_ME_PUBLIC_SUBNET_ONE
+    Value: !Ref 'PublicSubnetOne'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PublicSubnetOne' ] ]
+  PublicSubnetTwo:
+    Description: REPLACE_ME_PUBLIC_SUBNET_TWO
+    Value: !Ref 'PublicSubnetTwo'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PublicSubnetTwo' ] ]
+  PrivateSubnetOne:
+    Description: REPLACE_ME_PRIVATE_SUBNET_ONE
+    Value: !Ref 'PrivateSubnetOne'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PrivateSubnetOne' ] ]
+  PrivateSubnetTwo:
+    Description: REPLACE_ME_PRIVATE_SUBNET_TWO
+    Value: !Ref 'PrivateSubnetTwo'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PrivateSubnetTwo' ] ]
+  FargateContainerSecurityGroup:
+    Description: REPLACE_ME_SECURITY_GROUP_ID
+    Value: !Ref 'FargateContainerSecurityGroup'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'FargateContainerSecurityGroup' ] ]
+  CodeBuildRole:
+    Description: REPLACE_ME_CODEBUILD_ROLE_ARN
+    Value: !GetAtt 'CodeBuildServiceRole.Arn'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'CodeBuildServiceRole' ] ]
+  CodePipelineRole:
+    Description: REPLACE_ME_CODEPIPELINE_ROLE_ARN
+    Value: !GetAtt 'CodePipelineServiceRole.Arn'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'CodePipelineServiceRole' ] ]
+
