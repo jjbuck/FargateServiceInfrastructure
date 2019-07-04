@@ -39,7 +39,11 @@ elif [ $1 == "create" ]; then
     
     # Create new Github repository for project
     echo "Creating new Github repository ${APP_NAME}..."
-    cd ../${AppName}
+    mkdir ../${APP_NAME}
+    cp Dockerfile ../${APP_NAME}/Dockerfile
+    cp buildspec.yml ../${APP_NAME}/buildspec.yml
+    cp -a app/ ../${APP_NAME}/app
+    cd ../${APP_NAME}
     git init
     touch README.md
     git add README.md
@@ -72,20 +76,3 @@ elif [ $1 == "update" ]; then
 else
     echo "You must specify either \"create\" or \"update\"." 
 fi
-
-
-
-
-
-
-
-
-
-
-# Setup Github OAUTH credentials through CLI. Will need to modify by hand
-# aws codebuild list-source-credentials
-
-
-
-
-
