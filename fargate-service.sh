@@ -3,7 +3,7 @@ set -e
 
 # Update these environment variables.
 export AWS_ACCOUNT_ID="784757526031"
-export APP_NAME="FooTest" # Make sure your AWS Secrets Manager uses this as the name and the key.
+export APP_NAME="CatsVsDogs"
 export AWS_REGION="us-west-2"
 export GITHUB_USER="jjbuck"
 export INFRASTRUCTURE_TEMPLATE="infrastructure_cloudformation.template.yml"

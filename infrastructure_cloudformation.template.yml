@@ -473,6 +473,7 @@ Resources:
         
   NetworkLoadBalancerTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: NetworkLoadBalancer
     Properties:
       Name: !Sub ${AppName}TargetGroup
       Port: 8080
@@ -484,9 +485,10 @@ Resources:
       HealthCheckProtocol: HTTP
       HealthyThresholdCount: 3
       UnhealthyThresholdCount: 3
-  
+      
   ElasticLoadBalancingListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: NetworkLoadBalancerTargetGroup
     Properties:
       DefaultActions:
         - TargetGroupArn: !Ref NetworkLoadBalancerTargetGroup
@@ -503,6 +505,7 @@ Resources:
 
   EcsServiceDefinition:
     Type: AWS::ECS::Service
+    DependsOn: ElasticLoadBalancingListener
     Properties:
       ServiceName: !Sub ${AppName}-Service
       Cluster: !Ref EcsCluster
