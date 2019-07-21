@@ -317,6 +317,7 @@ Resources:
                 - 'logs:CreateLogStream'
                 - 'logs:CreateLogGroup'
                 - 'logs:PutLogEvents'
+                - 'cloudwatch:*'
               Resource: '*'
 
             - Effect: Allow
